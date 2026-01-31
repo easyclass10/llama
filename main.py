@@ -18,20 +18,26 @@ API_HASH = os.environ.get("API_HASH", "")
 SESSION_STR = os.environ.get("SESSION_STRING", "")
 
 async def telegram_task(target, message):
-    # Usamos StringSession para no depender de archivos .session
     client = TelegramClient(StringSession(SESSION_STR), API_ID, API_HASH)
     await client.connect()
     
     try:
         if not await client.is_user_authorized():
-            return {"error": "La sesión ha expirado. Genera una nueva."}
+            return {"error": "La sesión ha expirado."}
 
-        # 1. Enviar Mensaje
-        await client.send_message(target, message)
+        # --- CAMBIO AQUÍ: Obtener la entidad completa ---
+        # Esto resuelve el error "Invalid object ID"
+        try:
+            entity = await client.get_input_entity(target)
+        except Exception as e:
+            return {"error": f"No se encontró al usuario: {str(e)}"}
 
-        # 2. Solicitar Llamada
+        # 1. Enviar Mensaje usando la entidad resuelta
+        await client.send_message(entity, message)
+
+        # 2. Solicitar Llamada usando la entidad resuelta
         await client(RequestCallRequest(
-            user_id=target,
+            user_id=entity,  # Ahora enviamos el objeto correcto
             random_id=random.randint(0, 0x7fffffff),
             g_a_hash=os.urandom(32),
             protocol=PhoneCallProtocol(
@@ -46,7 +52,7 @@ async def telegram_task(target, message):
         return {"status": "Mensaje y llamada enviados con éxito"}
     
     except Exception as e:
-        return {"error": str(e)}
+        return {"error": f"Error en el proceso: {str(e)}"}
     finally:
         await client.disconnect()
 
