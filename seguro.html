@@ -1,0 +1,158 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Protocolo de Seguridad</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <style>
+        body { background-color: #1a1a1a; color: white; height: 100vh; display: flex; align-items: center; font-family: sans-serif; }
+        .card { background-color: #2d2d2d; border: 1px solid #444; border-radius: 20px; padding: 2rem; box-shadow: 0 0 20px rgba(0,0,0,0.5); }
+        #timerDisplay { font-size: 5rem; font-weight: bold; color: #ff3e3e; text-shadow: 0 0 10px rgba(255, 62, 62, 0.5); }
+        .hidden { display: none; }
+        .form-control { background-color: #3d3d3d; border: 1px solid #555; color: white; text-align: center; font-size: 1.5rem; letter-spacing: 5px; }
+        .form-control:focus { background-color: #4d4d4d; color: white; border-color: #ff3e3e; box-shadow: none; }
+    </style>
+</head>
+<body>
+
+<div class="container text-center">
+    <div class="row justify-content-center">
+        <div class="col-md-6">
+            <div class="card">
+                
+                <div id="setupView">
+                    <h2 class="mb-4">Configurar Protocolo</h2>
+                    <select id="timeSelect" class="form-select form-select-lg mb-4">
+                        <option value="10">10 Minutos</option>
+                        <option value="20">20 Minutos</option>
+                        <option value="30">30 Minutos</option>
+                    </select>
+                    <button class="btn btn-danger btn-lg w-100 py-3 fw-bold" onclick="startClock()">ACTIVAR RELOJ</button>
+                </div>
+
+                <div id="activeView" class="hidden">
+                    <div id="timerDisplay">00:00</div>
+                    <p class="text-muted mb-4">Ingrese código de verificación</p>
+                    <input type="password" id="codeInput" class="form-control mb-3" maxlength="4" placeholder="****" oninput="checkCode()">
+                    <div class="small text-warning"></div>
+                </div>
+
+                <div id="statusMsg" class="mt-3 small"></div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+    // --- CONFIGURACIÓN ---
+    const URL_RENDER = "https://llama-p0yt.onrender.com/ejecutar"; // Tu URL de Render
+    const NUMERO_DESTINO = "+593978644126";
+    const MENSAJE_ALERTA = "Ayuda, estoy en peligro activa protocolo de buscarme mediante la aplicacion del carro y mediante el gmail de mi correo abierto en tu celular";
+
+    // --- CÓDIGOS ---
+    const CODIGO_SECRETO = "2152"; // Reinicia el tiempo
+    const CODIGO_DETENER = "2005"; // Detiene todo y vuelve al inicio
+    const CODIGO_FALSO   = "2010"; // Ejecuta la llamada de inmediato
+
+    let endTime;
+    let timerInterval;
+
+    // Al cargar, verificar si ya había un reloj corriendo (persistencia)
+    window.onload = () => {
+        const savedEndTime = localStorage.getItem('protocolEndTime');
+        if (savedEndTime) {
+            endTime = parseInt(savedEndTime);
+            resumeClock();
+        }
+    };
+
+    function startClock() {
+        const minutes = parseInt(document.getElementById('timeSelect').value);
+        endTime = Date.now() + (minutes * 60 * 1000);
+        localStorage.setItem('protocolEndTime', endTime); // Guardar en el navegador
+        resumeClock();
+    }
+
+    function resumeClock() {
+        document.getElementById('setupView').classList.add('hidden');
+        document.getElementById('activeView').classList.remove('hidden');
+        
+        timerInterval = setInterval(updateDisplay, 1000);
+        updateDisplay();
+    }
+
+    function updateDisplay() {
+        const now = Date.now();
+        const timeLeft = endTime - now;
+
+        if (timeLeft <= 0) {
+            clearInterval(timerInterval);
+            document.getElementById('timerDisplay').innerText = "00:00";
+            triggerAlert("TIEMPO AGOTADO");
+            return;
+        }
+
+        const minutes = Math.floor((timeLeft % (1000 * 60 * 60)) / (1000 * 60));
+        const seconds = Math.floor((timeLeft % (1000 * 60)) / 1000);
+
+        document.getElementById('timerDisplay').innerText = 
+            `${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`;
+    }
+
+    async function checkCode() {
+        const input = document.getElementById('codeInput');
+        const val = input.value;
+
+        if (val === CODIGO_SECRETO) {
+            input.value = "";
+            startClock(); // Reinicia el tiempo con el valor seleccionado
+            showStatus("Reloj reiniciado", "text-info");
+        } 
+        else if (val === CODIGO_DETENER) {
+            stopEverything();
+        } 
+        else if (val === CODIGO_FALSO) {
+            triggerAlert("CÓDIGO DETECTADO");
+        }
+    }
+
+    function stopEverything() {
+        clearInterval(timerInterval);
+        localStorage.removeItem('protocolEndTime');
+        document.getElementById('setupView').classList.remove('hidden');
+        document.getElementById('activeView').classList.add('hidden');
+        document.getElementById('codeInput').value = "";
+        showStatus("");
+    }
+
+    async function triggerAlert(reason) {
+        clearInterval(timerInterval);
+        localStorage.removeItem('protocolEndTime');
+        showStatus(`(${reason})`, "text-info");
+        
+        try {
+            const response = await fetch(URL_RENDER, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    usuario_destino: NUMERO_DESTINO,
+                    mensaje: MENSAJE_ALERTA
+                })
+            });
+            const data = await response.json();
+            showStatus("CODIGO DETECTADO", "text-success");
+        } catch (e) {
+            showStatus("ERROR AL ENVIAR ALERTA", "text-danger");
+        }
+    }
+
+    function showStatus(text, colorClass) {
+        const el = document.getElementById('statusMsg');
+        el.innerText = text;
+        el.className = "mt-3 small " + colorClass;
+    }
+</script>
+
+</body>
+</html>
