@@ -7,6 +7,7 @@ from telethon import TelegramClient
 from telethon.sessions import StringSession
 from telethon.tl.functions.phone import RequestCallRequest
 from telethon.tl.types import PhoneCallProtocol
+import hashlib
 
 app = Flask(__name__)
 CORS(app)
@@ -35,21 +36,30 @@ async def telegram_task(target, message):
         # 1. Enviar Mensaje usando la entidad resuelta
         await client.send_message(entity, message)
 
-        # 2. Solicitar Llamada usando la entidad resuelta
-        await client(RequestCallRequest(
-            user_id=entity,  # Ahora enviamos el objeto correcto
-            random_id=random.randint(0, 0x7fffffff),
-            g_a_hash=os.urandom(32),
-            protocol=PhoneCallProtocol(
-                udp_p2p=True,
-                udp_reflector=True,
-                min_layer=92,
-                max_layer=92,
-                library_versions=['1.0.0']
-            ),
-            video=False
-        ))
-        return {"status": "Mensaje y llamada enviados con éxito"}
+        # 2. Solicitar Llamada con un Hash más estructurado
+        # Nota: Generamos un hash que Telegram acepte como válido para el protocolo DH
+        g_a = bytes([random.randint(0, 255) for _ in range(256)])
+        g_a_hash = hashlib.sha256(g_a).digest()
+
+        try:
+            await client(RequestCallRequest(
+                user_id=entity,
+                random_id=random.randint(0, 0x7fffffff),
+                g_a_hash=g_a_hash,
+                protocol=PhoneCallProtocol(
+                    udp_p2p=True,
+                    udp_reflector=True,
+                    min_layer=92,
+                    max_layer=92,
+                    library_versions=['1.0.0']
+                ),
+                video=False
+            ))
+            # Damos un pequeño respiro para que el servidor procese la solicitud
+            await asyncio.sleep(2) 
+            return {"status": "Mensaje enviado y señal de llamada lanzada"}
+        except Exception as call_error:
+            return {"status": "Mensaje enviado", "error_llamada": str(call_error)}
     
     except Exception as e:
         return {"error": f"Error en el proceso: {str(e)}"}
