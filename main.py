@@ -47,16 +47,31 @@ async def ensure_connection():
         await client.connect()
     return await client.is_user_authorized()
 
+
 async def get_telegram_status_async():
-    """Verifica el estado real obteniendo info del usuario."""
+    """Verifica el estado e imprime errores detallados."""
     try:
+        print(f"[{datetime.now()}] 📡 Verificando estado de Telegram...")
+        
         if not client.is_connected():
+            print(f"[{datetime.now()}] 🔌 Cliente desconectado. Intentando conectar...")
             await client.connect()
+        
         if not await client.is_user_authorized():
-            return {"status": "error", "message": "Sesión no autorizada"}
+            print(f"[{datetime.now()}] ❌ ERROR: Sesión NO autorizada.")
+            return {"status": "error", "message": "Sesión no autorizada. Verifica SESSION_STRING."}
+        
         me = await client.get_me()
-        return {"status": "connected", "username": me.username, "id": me.id, "first_name": me.first_name}
+        print(f"[{datetime.now()}] ✅ Telegram OK: {me.first_name}")
+        return {
+            "status": "connected", 
+            "username": me.username, 
+            "id": me.id, 
+            "first_name": me.first_name
+        }
     except Exception as e:
+        # Capturamos cualquier error interno (ej. ApiIdInvalid, NetworkError)
+        print(f"[{datetime.now()}] ❌ ERROR INTERNO en get_telegram_status_async: {str(e)}")
         return {"status": "error", "message": str(e)}
 
 # --- LÓGICA DE EMERGENCIA (ACTUALIZADA) ---
@@ -174,14 +189,26 @@ scheduler.start()
 
 @app.route('/telegram_status', methods=['GET'])
 def telegram_status():
-    """Ruta para verificar conexión con Telegram."""
+    """Ruta con logs mejorados para encontrar el problema."""
+    print(f"[{datetime.now()}] --- Petición recibida en /telegram_status ---")
     try:
+        # Enviamos la verificación al hilo async
         future = asyncio.run_coroutine_threadsafe(get_telegram_status_async(), loop)
-        result = future.result(timeout=10)
+        
+        # Esperamos el resultado (aumentamos timeout a 15s para dar tiempo a conectar si está recién iniciando)
+        result = future.result(timeout=15)
+        
         return jsonify(result), 200 if result['status'] == 'connected' else 500
+    except asyncio.TimeoutError:
+        print(f"[{datetime.now()}] ❌ TIMEOUT: Telegram tardó más de 15s en responder.")
+        return jsonify({"status": "error", "message": "Timeout conectando con Telegram"}), 500
     except Exception as e:
-        return jsonify({"status": "error", "message": f"Timeout o error interno: {str(e)}"}), 500
-
+        # Imprimimos el rastro completo del error (Stack Trace) en los logs
+        import traceback
+        print(f"[{datetime.now()}] ❌ ERROR CRÍTICO EN LA RUTA /telegram_status: {e}")
+        traceback.print_exc() 
+        return jsonify({"status": "error", "message": f"Internal Server Error: {str(e)}"}), 500
+    
 @app.route('/ejecutar_emergencia', methods=['POST'])
 def force_trigger():
     """
@@ -213,8 +240,18 @@ def ping():
 
 if __name__ == '__main__':
     print("🚀 Iniciando servidor...")
-    # Conectar al inicio
-    asyncio.run_coroutine_threadsafe(ensure_connection(), loop)
     
+    # INTENTAR CONECTAR Y ESPERAR EL RESULTADO
+    try:
+        future = asyncio.run_coroutine_threadsafe(ensure_connection(), loop)
+        connected = future.result(timeout=20) # Esperar hasta 20s al iniciar
+        
+        if connected:
+            print("✅ Telegram conectado al iniciar correctamente.")
+        else:
+            print("⚠️ ADVERTENCIA: Telegram no pudo conectar (Sesión inválida?).")
+    except Exception as e:
+        print(f"❌ Error crítico al conectar al inicio: {e}")
+
     port = int(os.environ.get("PORT", 8000))
     app.run(host='0.0.0.0', port=port)
