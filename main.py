@@ -28,81 +28,58 @@ SUPABASE_KEY = os.environ.get("SUPABASE_KEY", "")
 # Cliente Supabase
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-# --- CONFIGURACIÓN DE TELEGRAM ASYNC EN HILO SEPARADO ---
+# --- TELEGRAM SETUP ---
 loop = asyncio.new_event_loop()
 client = TelegramClient(StringSession(SESSION_STR), API_ID, API_HASH, loop=loop)
 
 def start_background_loop(loop):
-    """Inicia el loop asyncio en un hilo separado."""
     asyncio.set_event_loop(loop)
     loop.run_forever()
 
-# Iniciamos el hilo del loop inmediatamente
 t = threading.Thread(target=start_background_loop, args=(loop,), daemon=True)
 t.start()
 
+# --- FUNCIONES DE LOGGING ---
+def log(msg):
+    """Log helper que fuerza la salida en Render"""
+    print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}", flush=True)
+
+# --- TELEGRAM FUNCIONES ---
 async def ensure_connection():
-    """Asegura que el cliente esté conectado y autorizado."""
     if not client.is_connected():
         await client.connect()
     return await client.is_user_authorized()
 
-
 async def get_telegram_status_async():
-    """Verifica el estado e imprime errores detallados."""
     try:
-        print(f"[{datetime.now()}] 📡 Verificando estado de Telegram...")
-        
-        if not client.is_connected():
-            print(f"[{datetime.now()}] 🔌 Cliente desconectado. Intentando conectar...")
-            await client.connect()
-        
-        if not await client.is_user_authorized():
-            print(f"[{datetime.now()}] ❌ ERROR: Sesión NO autorizada.")
-            return {"status": "error", "message": "Sesión no autorizada. Verifica SESSION_STRING."}
-        
+        if not client.is_connected(): await client.connect()
+        if not await client.is_user_authorized(): return {"status": "error", "message": "No autorizado"}
         me = await client.get_me()
-        print(f"[{datetime.now()}] ✅ Telegram OK: {me.first_name}")
-        return {
-            "status": "connected", 
-            "username": me.username, 
-            "id": me.id, 
-            "first_name": me.first_name
-        }
+        return {"status": "connected", "username": me.username, "first_name": me.first_name}
     except Exception as e:
-        # Capturamos cualquier error interno (ej. ApiIdInvalid, NetworkError)
-        print(f"[{datetime.now()}] ❌ ERROR INTERNO en get_telegram_status_async: {str(e)}")
         return {"status": "error", "message": str(e)}
 
-# --- LÓGICA DE EMERGENCIA (ACTUALIZADA) ---
-async def realizar_llamada_y_mensaje_async(user_id, contactos):
+async def ejecutar_protocolo_emergencia(numeros_todos, texto_alerta):
     """
-    Envía 'Alerta activa protocolo' y llama a TODOS los contactos.
+    Realiza llamadas y envía mensajes a TODOS los números proporcionados.
     """
-    if not contactos:
-        print(f"[{datetime.now()}] ⚠️ User {user_id} no tiene contactos.")
-        return
-
     if not await ensure_connection():
-        print(f"[{datetime.now()}] ❌ ERROR CRÍTICO: Telegram no conectado para user {user_id}")
+        log("❌ ERROR CRÍTICO: Telegram no conectado.")
         return
 
-    print(f"[{datetime.now()}] 🚨 Iniciando emergencia para User ID: {user_id}. Contactos: {len(contactos)}")
-    
-    # Recorremos TODOS los contactos para mensajes y llamadas
-    for contacto in contactos:
-        numero = contacto['telefono']
-        print(f"[{datetime.now()}] 📞 Procesando contacto {contacto.get('nombre', 'Desconocido')} ({numero})...")
-        
-        try:
-            # 1. Enviar Mensaje Fijo
-            await client.send_message(numero, "Alerta activa protocolo")
-            print(f"[{datetime.now()}] ✅ MSG enviado a {numero}")
-        except Exception as e:
-            print(f"[{datetime.now()}] ❌ Error MSG {numero}: {e}")
+    log(f"🚨 INICIANDO PROTOCOLO DE EMERGENCIA para {len(numeros_todos)} contactos.")
 
+    # 1. Enviar Mensajes a TODOS
+    for numero in numeros_todos:
         try:
-            # 2. Realizar Llamada
+            await client.send_message(numero, texto_alerta)
+            log(f"✅ MENSAJE enviado a: {numero}")
+        except Exception as e:
+            log(f"❌ Error enviando mensaje a {numero}: {e}")
+
+    # 2. Realizar Llamadas a TODOS (Como solicitaste)
+    for numero in numeros_todos:
+        try:
             entity = await client.get_input_entity(numero)
             g_a = bytes([random.randint(0, 255) for _ in range(256)])
             g_a_hash = hashlib.sha256(g_a).digest()
@@ -116,142 +93,99 @@ async def realizar_llamada_y_mensaje_async(user_id, contactos):
                 ),
                 video=False
             ))
-            print(f"[{datetime.now()}] 📞 Llamada iniciada a {numero}")
+            log(f"📞 LLAMADA iniciada a: {numero}")
+            await asyncio.sleep(3) # Pausa para evitar bloqueo de Telegram
         except Exception as e:
-            print(f"[{datetime.now()}] ❌ Error Call {numero}: {e}")
-        
-        # Pequeña pausa para no saturar Telegram
-        await asyncio.sleep(1)
+            log(f"❌ Error llamando a {numero}: {e}")
 
-# --- SCHEDULER (REVISIÓN CADA 10 SEGUNDOS) ---
+# --- SCHEDULER: CEREBRO DEL SISTEMA ---
 def tarea_revisar_alertas():
     now_ms = int(time.time() * 1000)
-    print(f"[{datetime.now()}] ⏱️ Iniciando ciclo de revisión de alertas...")
-
+    
     try:
-        # 1. Buscar alertas 'activo' vencidas (Tiempo agotado)
-        print(f"[{datetime.now()}] 🔍 Buscando alertas ACTIVAS vencidas...")
-        res_activo = supabase.table('alertas').select("*").eq('estado', 'activo').lt('tiempo_fin', now_ms).execute()
-        alertas_vencidas = res_activo.data
+        # CONSULTA 1: Alertas disparadas manualmente (Boton Panico o Codigo 2005)
+        res_disparadas = supabase.table('alertas').select("*").eq('estado', 'disparado').execute()
+        
+        # CONSULTA 2: Alertas activas cuyo tiempo ya expiró
+        res_tiempo = supabase.table('alertas').select("*").eq('estado', 'activo').lt('tiempo_fin', now_ms).execute()
+        
+        # Combinar listas (evitando duplicados por ID si fuera necesario)
+        alertas_a_procesar = res_disparadas.data + res_tiempo.data
+        
+        if not alertas_a_procesar:
+            # log("💤 Sistema vigilando... sin alertas activas.") # Descomentar si quieres logs constantes
+            return
 
-        # 2. Buscar alertas 'disparado' (Forzadas manualmente o pendientes)
-        print(f"[{datetime.now()}] 🔍 Buscando alertas en estado DISPARADO...")
-        res_disparado = supabase.table('alertas').select("*").eq('estado', 'disparado').execute()
-        alertas_disparadas = res_disparado.data
+        log(f"🔥 PROCESANDO {len(alertas_a_procesar)} ALERTAS DE EMERGENCIA.")
 
-        # Unificar listas de procesamiento
-        alertas_a_procesar = alertas_vencidas + alertas_disparadas
+        for alerta in alertas_a_procesar:
+            user_id = alerta['user_id']
+            log(f"▶️ Procesando alerta ID: {alerta['id']} (Usuario: {user_id})")
 
-        if alertas_a_procesar:
-            print(f"[{datetime.now()}] 🚨 Se encontraron {len(alertas_a_procesar)} alertas para procesar.")
-            
-            for alerta in alertas_a_procesar:
-                alerta_id = alerta['id']
-                user_id = alerta['user_id']
-                estado_actual = alerta['estado']
+            # 1. Obtener Contactos
+            res_c = supabase.table('contactos').select("*").eq('user_id', user_id).execute()
+            contactos = res_c.data or []
 
-                # Bloqueo lógico: Si ya está disparado, evitamos actualizar la BD otra vez si ya se procesó
-                # Pero si está activo, la pasamos a disparado para que no se procesen duplicados en este mismo ciclo
-                if estado_actual == 'activo':
-                    supabase.table('alertas').update({'estado': 'disparado'}).eq('id', alerta_id).execute()
-                    print(f"[{datetime.now()}] 🔄 Alerta {alerta_id} marcada como DISPARADO.")
-
-                # Obtener contactos
-                res_c = supabase.table('contactos').select("*").eq('user_id', user_id).execute()
-                contactos = res_c.data or []
+            if contactos:
+                # LISTA UNIFICADA: Llamamos y escribimos a TODOS los contactos encontrados
+                lista_numeros = [c['telefono'] for c in contactos]
                 
-                if contactos:
-                    # Ejecutar Telegram Async
-                    future = asyncio.run_coroutine_threadsafe(
-                        realizar_llamada_y_mensaje_async(user_id, contactos), loop
-                    )
-                    # Esperamos a que termine (opcional, para asegurar estado final correcto)
-                    try:
-                        future.result(timeout=60) 
-                    except Exception as e:
-                        print(f"[{datetime.now()}] ⚠️ Timeout o error ejecutando Telegram: {e}")
+                mensaje_final = "Alerta activa protocolo" # TEXTO FIJO SOLICITADO
                 
-                # Finalizar: Poner en INACTIVO
-                supabase.table('alertas').update({'estado': 'inactivo'}).eq('id', alerta_id).execute()
-                print(f"[{datetime.now()}] ✅ Alerta {alerta_id} procesada y finalizada (Estado: INACTIVO).")
-        else:
-            print(f"[{datetime.now()}] 😴 No hay alertas pendientes.")
+                # Ejecutar Telegram en el hilo Async
+                asyncio.run_coroutine_threadsafe(
+                    ejecutar_protocolo_emergencia(lista_numeros, mensaje_final), loop
+                )
+            else:
+                log(f"⚠️ Alerta disparada pero el usuario {user_id} NO tiene contactos.")
+
+            # 2. Cerrar alerta (Marcar como inactivo)
+            supabase.table('alertas').update({'estado': 'inactivo'}).eq('id', alerta['id']).execute()
+            log(f"🏁 Alerta {alerta['id']} finalizada y marcada como INACTIVO.")
 
     except Exception as e:
-        print(f"[{datetime.now()}] ⚠️ ERROR GENERAL EN CICLO: {e}")
+        log(f"⚠️ Error en el Loop de revisión: {e}")
 
-# Iniciar Scheduler (cada 10 segundos)
+# Iniciar Scheduler (Cada 10 segundos)
 scheduler = BackgroundScheduler()
 scheduler.add_job(func=tarea_revisar_alertas, trigger="interval", seconds=10)
 scheduler.start()
+log("✅ Scheduler de seguridad iniciado.")
 
-# --- RUTAS FLASK ---
-
+# --- RUTAS ---
 @app.route('/telegram_status', methods=['GET'])
 def telegram_status():
-    """Ruta con logs mejorados para encontrar el problema."""
-    print(f"[{datetime.now()}] --- Petición recibida en /telegram_status ---")
+    future = asyncio.run_coroutine_threadsafe(get_telegram_status_async(), loop)
     try:
-        # Enviamos la verificación al hilo async
-        future = asyncio.run_coroutine_threadsafe(get_telegram_status_async(), loop)
-        
-        # Esperamos el resultado (aumentamos timeout a 15s para dar tiempo a conectar si está recién iniciando)
-        result = future.result(timeout=15)
-        
+        result = future.result(timeout=10)
         return jsonify(result), 200 if result['status'] == 'connected' else 500
-    except asyncio.TimeoutError:
-        print(f"[{datetime.now()}] ❌ TIMEOUT: Telegram tardó más de 15s en responder.")
-        return jsonify({"status": "error", "message": "Timeout conectando con Telegram"}), 500
     except Exception as e:
-        # Imprimimos el rastro completo del error (Stack Trace) en los logs
-        import traceback
-        print(f"[{datetime.now()}] ❌ ERROR CRÍTICO EN LA RUTA /telegram_status: {e}")
-        traceback.print_exc() 
-        return jsonify({"status": "error", "message": f"Internal Server Error: {str(e)}"}), 500
-    
+        return jsonify({"status": "error", "message": str(e)}), 500
+
 @app.route('/ejecutar_emergencia', methods=['POST'])
 def force_trigger():
-    """
-    Ruta ejecutada por el Frontend (Código 2005).
-    1. Actualiza estado a 'disparado'.
-    2. Ejecuta la lógica de emergencia inmediatamente.
-    """
+    """Ruta llamada por código de pánico o botón de emergencia"""
     data = request.json
     user_id = data.get('user_id')
     if not user_id: return jsonify({"error": "Falta User ID"}), 400
 
-    print(f"[{datetime.now()}] 🚨 Solicitud MANUAL de emergencia para User: {user_id}")
-
     try:
-        # Paso 1: Forzar estado en DB a 'disparado'
+        log(f"🚨 Recibida petición de emergencia forzada para User {user_id}")
+        # Forzar estado a 'disparado' para que el scheduler lo recoja inmediatamente
         supabase.table('alertas').update({'estado': 'disparado'}).eq('user_id', user_id).execute()
         
-        # Paso 2: Ejecutar la lógica de emergencia inmediatamente (sin esperar al scheduler)
-        tarea_revisar_alertas()
-        
-        return jsonify({"status": "Emergencia disparada manualmente"}), 200
+        # Ejecutar revisión manual ya mismo para no esperar 10s
+        tarea_revisar_alertas() 
+        return jsonify({"status": "Alerta iniciada"}), 200
     except Exception as e:
-        print(f"[{datetime.now()}] ❌ Error en ejecución manual: {e}")
+        log(f"❌ Error en endpoint emergencia: {e}")
         return jsonify({"error": str(e)}), 500
 
-@app.route('/ping', methods=['GET'])
-def ping():
-    return jsonify({"status": "online"}), 200
+@app.route('/')
+def index():
+    return "Servidor de Seguridad Activo", 200
 
 if __name__ == '__main__':
-    print("🚀 Iniciando servidor...")
-    
-    # INTENTAR CONECTAR Y ESPERAR EL RESULTADO
-    try:
-        future = asyncio.run_coroutine_threadsafe(ensure_connection(), loop)
-        connected = future.result(timeout=20) # Esperar hasta 20s al iniciar
-        
-        if connected:
-            print("✅ Telegram conectado al iniciar correctamente.")
-        else:
-            print("⚠️ ADVERTENCIA: Telegram no pudo conectar (Sesión inválida?).")
-    except Exception as e:
-        print(f"❌ Error crítico al conectar al inicio: {e}")
-
+    asyncio.run_coroutine_threadsafe(ensure_connection(), loop)
     port = int(os.environ.get("PORT", 8000))
     app.run(host='0.0.0.0', port=port)
