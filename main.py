@@ -4,6 +4,7 @@ import random
 import time
 import hashlib
 import sys
+import threading
 from datetime import datetime
 from flask import Flask, request, jsonify
 from flask_cors import CORS
@@ -24,29 +25,57 @@ SESSION_STR = os.environ.get("SESSION_STRING", "")
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "")
 SUPABASE_KEY = os.environ.get("SUPABASE_KEY", "")
 
+# Cliente Supabase
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
-client = TelegramClient(StringSession(SESSION_STR), API_ID, API_HASH)
 
-# Loop global para manejar tareas async desde el scheduler sync
-loop = asyncio.get_event_loop()
+# --- CONFIGURACIÓN DE TELEGRAM ASYNC EN HILO SEPARADO ---
+loop = asyncio.new_event_loop()
+client = TelegramClient(StringSession(SESSION_STR), API_ID, API_HASH, loop=loop)
 
-async def conectar_telegram():
-    """Mantiene la conexión activa."""
+def start_background_loop(loop):
+    """Inicia el loop asyncio en un hilo separado."""
+    asyncio.set_event_loop(loop)
+    loop.run_forever()
+
+# Iniciamos el hilo del loop inmediatamente
+t = threading.Thread(target=start_background_loop, args=(loop,), daemon=True)
+t.start()
+
+async def ensure_connection():
+    """Asegura que el cliente esté conectado y autorizado."""
     if not client.is_connected():
         await client.connect()
-    if not await client.is_user_authorized():
-        print("❌ ERROR: Sesión de Telegram inválida.")
-        return False
-    return True
+    return await client.is_user_authorized()
+
+async def get_telegram_status_async():
+    """Verifica el estado real obteniendo info del usuario."""
+    try:
+        if not client.is_connected():
+            await client.connect()
+        
+        if not await client.is_user_authorized():
+            return {"status": "error", "message": "Sesión no autorizada"}
+        
+        me = await client.get_me()
+        return {
+            "status": "connected", 
+            "username": me.username, 
+            "id": me.id, 
+            "first_name": me.first_name
+        }
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
 
 async def realizar_llamada_y_mensaje(numeros_llamada, numeros_mensaje, texto_alerta):
-    await conectar_telegram()
-    
+    if not await ensure_connection():
+        print("❌ ERROR: No se pudo conectar a Telegram para enviar alertas.")
+        return
+
     # 1. Enviar Mensajes
     for numero in numeros_mensaje:
         try:
             await client.send_message(numero, texto_alerta)
-            print(f"✅ MSG enviado: {numero}")
+            print(f"✅ MSG enviado a: {numero}")
         except Exception as e:
             print(f"❌ Error MSG {numero}: {e}")
 
@@ -66,49 +95,67 @@ async def realizar_llamada_y_mensaje(numeros_llamada, numeros_mensaje, texto_ale
                 ),
                 video=False
             ))
-            print(f"📞 Llamada iniciada: {numero}")
-            await asyncio.sleep(1) 
+            print(f"📞 Llamada iniciada a: {numero}")
+            await asyncio.sleep(2) # Espera técnica para evitar flood limits
         except Exception as e:
             print(f"❌ Error Call {numero}: {e}")
 
+# --- SCHEDULER (TAREA CADA 10 SEGUNDOS) ---
 def tarea_revisar_alertas():
-    """Función envuelta para correr en el loop global desde el scheduler."""
     now_ms = int(time.time() * 1000)
     try:
-        # Paso 1: Buscar alertas vencidas
+        # Paso 1: Buscar alertas vencidas (estado activo y tiempo superado)
         res = supabase.table('alertas').select("*").eq('estado', 'activo').lt('tiempo_fin', now_ms).execute()
         alertas_vencidas = res.data
 
         if alertas_vencidas:
+            print(f"⏰ Procesando {len(alertas_vencidas)} alertas vencidas.")
             for alerta in alertas_vencidas:
-                # Actualizar a disparado inmediatamente para evitar doble procesamiento
+                # Marcar como disparado INMEDIATAMENTE para evitar duplicidad si el proceso tarda
                 supabase.table('alertas').update({'estado': 'disparado'}).eq('id', alerta['id']).execute()
                 
+                # Preparar datos
                 user_id = alerta['user_id']
                 msg = alerta.get('mensaje_personalizado', "Alerta de seguridad activada.")
                 
                 # Obtener contactos
                 res_c = supabase.table('contactos').select("*").eq('user_id', user_id).execute()
-                if res_c.data:
-                    nums_call = [c['telefono'] for c in res_c.data if c['es_primario']]
-                    nums_msg = [c['telefono'] for c in res_c.data]
+                contactos = res_c.data or []
+                
+                if contactos:
+                    nums_call = [c['telefono'] for c in contactos if c['es_primario']]
+                    nums_msg = [c['telefono'] for c in contactos]
                     
-                    # Ejecutar la corrutina en el loop principal
-                    asyncio.run_coroutine_threadsafe(
+                    # EJECUTAR TELEGRAM EN EL HILO ASYNC
+                    # run_coroutine_threadsafe envía la tarea al hilo 't' que creamos arriba
+                    future = asyncio.run_coroutine_threadsafe(
                         realizar_llamada_y_mensaje(nums_call, nums_msg, msg), loop
                     )
                 
-                # Finalizar alerta
+                # Finalizar alerta en DB
                 supabase.table('alertas').update({'estado': 'inactivo'}).eq('id', alerta['id']).execute()
-                print(f"🏁 Alerta {alerta['id']} procesada.")
+                print(f"🏁 Alerta {alerta['id']} finalizada.")
 
     except Exception as e:
-        print(f"⚠️ Error en ciclo: {e}")
+        print(f"⚠️ Error en tarea programada: {e}")
 
-# --- SCHEDULER ---
+# Iniciar Scheduler
 scheduler = BackgroundScheduler()
 scheduler.add_job(func=tarea_revisar_alertas, trigger="interval", seconds=10)
 scheduler.start()
+
+# --- RUTAS FLASK ---
+
+@app.route('/telegram_status', methods=['GET'])
+def telegram_status():
+    """Nueva ruta para verificar conexión con Telegram."""
+    try:
+        # Enviamos la verificación al hilo async y esperamos el resultado (con timeout de 5s)
+        future = asyncio.run_coroutine_threadsafe(get_telegram_status_async(), loop)
+        result = future.result(timeout=10)
+        return jsonify(result), 200 if result['status'] == 'connected' else 500
+    except Exception as e:
+        return jsonify({"status": "error", "message": f"Timeout o error interno: {str(e)}"}), 500
 
 @app.route('/ejecutar_emergencia', methods=['POST'])
 def force_trigger():
@@ -116,18 +163,22 @@ def force_trigger():
     user_id = data.get('user_id')
     if not user_id: return jsonify({"error": "Falta User ID"}), 400
 
-    # Forzamos el estado a disparado para que el scheduler lo pesque o lo ejecutamos directo
-    supabase.table('alertas').update({'estado': 'disparado'}).eq('user_id', user_id).execute()
-    # Ejecución inmediata para no esperar los 10s del scheduler
-    tarea_revisar_alertas()
-    return jsonify({"status": "Alerta disparada"}), 200
+    try:
+        # Forzar estado en DB
+        supabase.table('alertas').update({'estado': 'disparado'}).eq('user_id', user_id).execute()
+        # Ejecutar revisión manual inmediata
+        tarea_revisar_alertas() 
+        return jsonify({"status": "Alerta disparada y procesada"}), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 @app.route('/ping', methods=['GET'])
 def ping():
     return jsonify({"status": "online"}), 200
 
 if __name__ == '__main__':
-    # Inicializar Telegram antes de arrancar Flask
-    loop.run_until_complete(conectar_telegram())
+    # Al arrancar, intentamos conectar Telegram una vez
+    asyncio.run_coroutine_threadsafe(ensure_connection(), loop)
+    
     port = int(os.environ.get("PORT", 8000))
     app.run(host='0.0.0.0', port=port)
