@@ -29,6 +29,7 @@ SUPABASE_KEY = os.environ.get("SUPABASE_KEY", "")
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 # --- CONFIGURACIÓN DE TELEGRAM ASYNC EN HILO SEPARADO ---
+# Creamos el loop y lo asignamos al cliente para consistencia
 loop = asyncio.new_event_loop()
 client = TelegramClient(StringSession(SESSION_STR), API_ID, API_HASH, loop=loop)
 
@@ -44,7 +45,11 @@ t.start()
 async def ensure_connection():
     """Asegura que el cliente esté conectado y autorizado."""
     if not client.is_connected():
-        await client.connect()
+        try:
+            await client.connect()
+        except Exception as e:
+            print(f"❌ Error conectando: {e}")
+            return False
     return await client.is_user_authorized()
 
 async def get_telegram_status_async():
@@ -96,7 +101,7 @@ async def realizar_llamada_y_mensaje(numeros_llamada, numeros_mensaje, texto_ale
                 video=False
             ))
             print(f"📞 Llamada iniciada a: {numero}")
-            await asyncio.sleep(2) # Espera técnica para evitar flood limits
+            await asyncio.sleep(2) 
         except Exception as e:
             print(f"❌ Error Call {numero}: {e}")
 
@@ -104,14 +109,14 @@ async def realizar_llamada_y_mensaje(numeros_llamada, numeros_mensaje, texto_ale
 def tarea_revisar_alertas():
     now_ms = int(time.time() * 1000)
     try:
-        # Paso 1: Buscar alertas vencidas (estado activo y tiempo superado)
+        # Paso 1: Buscar alertas vencidas
         res = supabase.table('alertas').select("*").eq('estado', 'activo').lt('tiempo_fin', now_ms).execute()
         alertas_vencidas = res.data
 
         if alertas_vencidas:
             print(f"⏰ Procesando {len(alertas_vencidas)} alertas vencidas.")
             for alerta in alertas_vencidas:
-                # Marcar como disparado INMEDIATAMENTE para evitar duplicidad si el proceso tarda
+                # Marcar como disparado INMEDIATAMENTE para evitar duplicidad
                 supabase.table('alertas').update({'estado': 'disparado'}).eq('id', alerta['id']).execute()
                 
                 # Preparar datos
@@ -126,9 +131,8 @@ def tarea_revisar_alertas():
                     nums_call = [c['telefono'] for c in contactos if c['es_primario']]
                     nums_msg = [c['telefono'] for c in contactos]
                     
-                    # EJECUTAR TELEGRAM EN EL HILO ASYNC
-                    # run_coroutine_threadsafe envía la tarea al hilo 't' que creamos arriba
-                    future = asyncio.run_coroutine_threadsafe(
+                    # Enviar tarea al loop de Telegram (Fire and Forget para no bloquear scheduler)
+                    asyncio.run_coroutine_threadsafe(
                         realizar_llamada_y_mensaje(nums_call, nums_msg, msg), loop
                     )
                 
@@ -148,9 +152,8 @@ scheduler.start()
 
 @app.route('/telegram_status', methods=['GET'])
 def telegram_status():
-    """Nueva ruta para verificar conexión con Telegram."""
+    """Ruta para verificar conexión con Telegram."""
     try:
-        # Enviamos la verificación al hilo async y esperamos el resultado (con timeout de 5s)
         future = asyncio.run_coroutine_threadsafe(get_telegram_status_async(), loop)
         result = future.result(timeout=10)
         return jsonify(result), 200 if result['status'] == 'connected' else 500
@@ -174,11 +177,19 @@ def force_trigger():
 
 @app.route('/ping', methods=['GET'])
 def ping():
-    return jsonify({"status": "online"}), 200
+    return jsonify({"status": "online", "timestamp": datetime.now().isoformat()}), 200
 
 if __name__ == '__main__':
-    # Al arrancar, intentamos conectar Telegram una vez
-    asyncio.run_coroutine_threadsafe(ensure_connection(), loop)
+    print("🚀 Iniciando servidor...")
+    # CORRECCIÓN: Esperamos explícitamente a que Telegram conecte antes de abrir Flask
+    try:
+        connected = asyncio.run_coroutine_threadsafe(ensure_connection(), loop).result(timeout=20)
+        if connected:
+            print("✅ Telegram conectado correctamente.")
+        else:
+            print("⚠️ ADVERTENCIA: Telegram no pudo conectar, revisa logs y variables de entorno.")
+    except Exception as e:
+        print(f"❌ Error crítico al conectar al inicio: {e}")
     
     port = int(os.environ.get("PORT", 8000))
     app.run(host='0.0.0.0', port=port)
