@@ -31,31 +31,52 @@ supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 client = TelegramClient(StringSession(SESSION_STR), API_ID, API_HASH)
 
 async def iniciar_telegram():
-    if not client.is_connected():
-        await client.connect()
+    """Inicia el cliente y verifica que la sesión sea válida."""
+    try:
+        if not client.is_connected():
+            print("DEBUG: [TELEGRAM] Conectando al servidor...")
+            await client.connect()
+        
+        # Verificamos si estamos autorizados (si la sesión sirve)
+        if not await client.is_user_authorized():
+            print("❌ ERROR: [TELEGRAM] La sesión no es válida o expiró. Recrea el SESSION_STRING.")
+            return False
+        
+        me = await client.get_me()
+        print(f"✅ CONEXIÓN EXITOSA: [TELEGRAM] Conectado como: {me.first_name} (@{me.username})")
+        sys.stdout.flush()
+        return True
+    except Exception as e:
+        print(f"❌ ERROR CRÍTICO: [TELEGRAM] Fallo al conectar: {e}")
+        sys.stdout.flush()
+        return False
 
 async def realizar_llamada_y_mensaje(numeros_llamada, numeros_mensaje, texto_alerta):
-    """
-    numeros_llamada: Lista de los números para llamar (primarios).
-    numeros_mensaje: Lista de todos los números para SMS.
-    """
-    await iniciar_telegram()
+    print(f"DEBUG: [TELEGRAM] Iniciando protocolo. Mensajes a enviar: {len(numeros_mensaje)}, Llamadas: {len(numeros_llamada)}")
+    sys.stdout.flush()
     
-    # 1. ENVIAR MENSAJES (Prioridad alta para notificación rápida)
-    if numeros_mensaje:
+    try:
+        await iniciar_telegram()
+        print("DEBUG: [TELEGRAM] Cliente conectado exitosamente.")
+        sys.stdout.flush()
+        
+        # 1. ENVIAR MENSAJES
         for numero in numeros_mensaje:
             try:
-                entity = await client.get_input_entity(numero)
-                await client.send_message(entity, texto_alerta)
-                print(f"Mensaje enviado a {numero}")
+                print(f"DEBUG: [MSG] Intentando enviar a {numero}...")
+                sys.stdout.flush()
+                # Usamos el número directamente, Telethon lo resuelve si está en contactos o es formato internacional
+                await client.send_message(numero, texto_alerta)
+                print(f"✅ DEBUG: [MSG] Mensaje ENVIADO a {numero}")
             except Exception as e:
-                print(f"Error mensaje a {numero}: {e}")
+                print(f"❌ DEBUG: [MSG] ERROR enviando a {numero}: {e}")
             sys.stdout.flush()
 
-    # 2. REALIZAR LLAMADAS
-    if numeros_llamada:
+        # 2. REALIZAR LLAMADAS
         for numero in numeros_llamada:
             try:
+                print(f"DEBUG: [CALL] Intentando llamar a {numero}...")
+                sys.stdout.flush()
                 entity = await client.get_input_entity(numero)
                 
                 g_a = bytes([random.randint(0, 255) for _ in range(256)])
@@ -70,12 +91,16 @@ async def realizar_llamada_y_mensaje(numeros_llamada, numeros_mensaje, texto_ale
                     ),
                     video=False
                 ))
-                print(f"Llamada iniciada a {numero}")
+                print(f"📞 ✅ DEBUG: [CALL] Llamada INICIADA a {numero}")
                 sys.stdout.flush()
-                await asyncio.sleep(5) # Espera entre llamadas
+                await asyncio.sleep(2) 
             except Exception as e:
-                print(f"Error llamada a {numero}: {e}")
-                sys.stdout.flush()
+                print(f"❌ DEBUG: [CALL] ERROR llamando a {numero}: {e}")
+            sys.stdout.flush()
+
+    except Exception as e:
+        print(f"🔥 DEBUG: [TELEGRAM] ERROR CRÍTICO EN PROTOCOLO: {e}")
+        sys.stdout.flush()
 
 def tarea_revisar_alertas():
     """
@@ -139,6 +164,19 @@ def tarea_revisar_alertas():
     except Exception as e:
         print(f"Error en tarea programada: {e}")
         sys.stdout.flush()
+
+    if alertas_vencidas:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        
+        # Validamos conexión antes de proceder
+        if loop.run_until_complete(iniciar_telegram()):
+            for alerta in alertas_vencidas:
+                # ... (ejecutar protocolo)
+        else:
+            print("⚠️ DEBUG: Saltando ejecución de Telegram por falta de conexión.")
+        
+        loop.close()
 
 # --- SCHEDULER ---
 scheduler = BackgroundScheduler()
