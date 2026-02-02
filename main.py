@@ -87,7 +87,7 @@ async def realizar_llamada_y_mensaje(numeros_llamada, numeros_mensaje, texto_ale
 
 def tarea_revisar_alertas():
     """
-    Esta función se ejecuta automáticamente cada X minutos.
+    Esta función se ejecuta automáticamente cada X segundos.
     Busca en Supabase relojes vencidos.
     """
     now_ms = int(time.time() * 1000)
@@ -115,7 +115,7 @@ def tarea_revisar_alertas():
                 nums_llamada = [c['telefono'] for c in contactos if c['es_primario']]
                 nums_mensaje = [c['telefono'] for c in contactos] # Todos reciben mensaje
 
-                print(f"Ejecutando protocolo para usuario {user_id}")
+                print(f"Ejecutando protocolo para usuario {user_id} con {len(nums_mensaje)} mensajes y {len(nums_llamada)} llamadas")
                 sys.stdout.flush()
                 
                 # Ejecutar alertas en Telegram
@@ -130,9 +130,9 @@ def tarea_revisar_alertas():
         sys.stdout.flush()
 
 # --- SCHEDULER ---
-# Ejecuta la revisión cada 1 minuto (5 minutos es mucho tiempo para una emergencia)
+# Ejecuta la revisión cada 30 segundos para mejor precisión en timers cortos
 scheduler = BackgroundScheduler()
-scheduler.add_job(func=tarea_revisar_alertas, trigger="interval", minutes=1)
+scheduler.add_job(func=tarea_revisar_alertas, trigger="interval", seconds=30)
 scheduler.start()
 
 # --- RUTAS FLASK ---
