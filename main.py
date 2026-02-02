@@ -122,39 +122,45 @@ scheduler.start()
 
 @app.route('/ejecutar_emergencia', methods=['POST'])
 def force_trigger():
-    """
-    Ruta para cuando se pone el CÓDIGO FALSO o se acaba el tiempo en el navegador
-    y queremos forzar la alerta inmediatamente sin esperar al scheduler.
-    """
     data = request.json
     user_id = data.get('user_id')
+    print(f"DEBUG: Recibida señal de emergencia para usuario {user_id}") # Log nuevo
     
     if not user_id:
         return jsonify({"error": "Falta User ID"}), 400
 
-    # Obtener contactos y mensaje
-    # (Lógica similar a la tarea programada pero invocada directamente)
     try:
+        # 1. Obtener datos de Supabase
         res_alerta = supabase.table('alertas').select("mensaje_personalizado").eq('user_id', user_id).execute()
         mensaje = "Ayuda, emergencia."
         if res_alerta.data:
             mensaje = res_alerta.data[0].get('mensaje_personalizado', mensaje)
+        print(f"DEBUG: Mensaje recuperado: {mensaje}") # Log nuevo
 
         res_contactos = supabase.table('contactos').select("*").eq('user_id', user_id).execute()
         contactos = res_contactos.data
+        print(f"DEBUG: Contactos encontrados: {len(contactos)}") # Log nuevo
         
         nums_llamada = [c['telefono'] for c in contactos if c['es_primario']]
         nums_mensaje = [c['telefono'] for c in contactos]
 
+        # 2. Telegram
+        print("DEBUG: Iniciando bucle de Telegram...") # Log nuevo
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         loop.run_until_complete(realizar_llamada_y_mensaje(nums_llamada, nums_mensaje, mensaje))
+        loop.close()
+        print("DEBUG: Telegram completado.") # Log nuevo
         
-        # Actualizar DB
-        supabase.table('alertas').update({'estado': 'disparado'}).eq('user_id', user_id).execute()
+        # 3. Actualizar DB (ESTE ES EL PASO QUE TE FALTA VER)
+        print("DEBUG: Actualizando estado en Supabase...") # Log nuevo
+        update_res = supabase.table('alertas').update({'estado': 'disparado'}).eq('user_id', user_id).execute()
+        print(f"DEBUG: Resultado update: {update_res.data}") # Log nuevo
         
-        return jsonify({"status": "Protocolo de emergencia ejecutado"})
+        return jsonify({"status": "Protocolo ejecutado"}), 200
+
     except Exception as e:
+        print(f"ERROR CRÍTICO: {str(e)}") # Esto te dirá exactamente qué falló
         return jsonify({"error": str(e)}), 500
 
 if __name__ == '__main__':
