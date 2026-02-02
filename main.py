@@ -37,13 +37,13 @@ async def iniciar_telegram():
             print("DEBUG: [TELEGRAM] Conectando al servidor...")
             await client.connect()
         
-        # Verificamos si estamos autorizados (si la sesión sirve)
         if not await client.is_user_authorized():
-            print("❌ ERROR: [TELEGRAM] La sesión no es válida o expiró. Recrea el SESSION_STRING.")
+            print("❌ ERROR: [TELEGRAM] La sesión no es válida o expiró.")
+            sys.stdout.flush()
             return False
         
         me = await client.get_me()
-        print(f"✅ CONEXIÓN EXITOSA: [TELEGRAM] Conectado como: {me.first_name} (@{me.username})")
+        print(f"✅ CONEXIÓN EXITOSA: [TELEGRAM] Conectado como: {me.first_name}")
         sys.stdout.flush()
         return True
     except Exception as e:
@@ -52,33 +52,29 @@ async def iniciar_telegram():
         return False
 
 async def realizar_llamada_y_mensaje(numeros_llamada, numeros_mensaje, texto_alerta):
-    print(f"DEBUG: [TELEGRAM] Iniciando protocolo. Mensajes a enviar: {len(numeros_mensaje)}, Llamadas: {len(numeros_llamada)}")
+    print(f"DEBUG: [TELEGRAM] Iniciando protocolo. Mensajes: {len(numeros_mensaje)}, Llamadas: {len(numeros_llamada)}")
     sys.stdout.flush()
     
     try:
-        await iniciar_telegram()
-        print("DEBUG: [TELEGRAM] Cliente conectado exitosamente.")
-        sys.stdout.flush()
-        
+        connected = await iniciar_telegram()
+        if not connected:
+            return
+
         # 1. ENVIAR MENSAJES
         for numero in numeros_mensaje:
             try:
-                print(f"DEBUG: [MSG] Intentando enviar a {numero}...")
-                sys.stdout.flush()
-                # Usamos el número directamente, Telethon lo resuelve si está en contactos o es formato internacional
+                print(f"DEBUG: [MSG] Enviando a {numero}...")
                 await client.send_message(numero, texto_alerta)
-                print(f"✅ DEBUG: [MSG] Mensaje ENVIADO a {numero}")
+                print(f"✅ DEBUG: [MSG] ENVIADO a {numero}")
             except Exception as e:
-                print(f"❌ DEBUG: [MSG] ERROR enviando a {numero}: {e}")
+                print(f"❌ DEBUG: [MSG] ERROR en {numero}: {e}")
             sys.stdout.flush()
 
         # 2. REALIZAR LLAMADAS
         for numero in numeros_llamada:
             try:
-                print(f"DEBUG: [CALL] Intentando llamar a {numero}...")
-                sys.stdout.flush()
+                print(f"DEBUG: [CALL] Llamando a {numero}...")
                 entity = await client.get_input_entity(numero)
-                
                 g_a = bytes([random.randint(0, 255) for _ in range(256)])
                 g_a_hash = hashlib.sha256(g_a).digest()
 
@@ -91,42 +87,29 @@ async def realizar_llamada_y_mensaje(numeros_llamada, numeros_mensaje, texto_ale
                     ),
                     video=False
                 ))
-                print(f"📞 ✅ DEBUG: [CALL] Llamada INICIADA a {numero}")
-                sys.stdout.flush()
+                print(f"📞 ✅ DEBUG: [CALL] INICIADA a {numero}")
                 await asyncio.sleep(2) 
             except Exception as e:
-                print(f"❌ DEBUG: [CALL] ERROR llamando a {numero}: {e}")
+                print(f"❌ DEBUG: [CALL] ERROR en {numero}: {e}")
             sys.stdout.flush()
 
     except Exception as e:
-        print(f"🔥 DEBUG: [TELEGRAM] ERROR CRÍTICO EN PROTOCOLO: {e}")
+        print(f"🔥 DEBUG: [TELEGRAM] ERROR GENERAL: {e}")
         sys.stdout.flush()
 
 def tarea_revisar_alertas():
-    """
-    Máquina de estados:
-    1. Activo + Vencido -> Disparado
-    2. Disparado -> Ejecutar Acciones -> Inactivo
-    """
     now_ms = int(time.time() * 1000)
     print(f"DEBUG: Ciclo de revisión... {datetime.fromtimestamp(now_ms/1000).strftime('%H:%M:%S')}")
     sys.stdout.flush()
 
     try:
-        # --- PASO 1: DETECTAR VENCIDOS (Activo -> Disparado) ---
-        # Buscamos alertas activas cuyo tiempo haya pasado y las marcamos como disparado
-        data_update = supabase.table('alertas') \
-            .update({'estado': 'disparado'}) \
-            .eq('estado', 'activo') \
-            .lt('tiempo_fin', now_ms) \
-            .execute()
+        # PASO 1: Activo -> Disparado
+        data_update = supabase.table('alertas').update({'estado': 'disparado'}).eq('estado', 'activo').lt('tiempo_fin', now_ms).execute()
         
         if data_update.data:
-            print(f"DEBUG: Se dispararon {len(data_update.data)} alertas por tiempo vencido.")
-            sys.stdout.flush()
+            print(f"DEBUG: Se dispararon {len(data_update.data)} alertas por tiempo.")
 
-        # --- PASO 2: PROCESAR DISPARADOS (Disparado -> Inactivo) ---
-        # Buscamos todo lo que esté en 'disparado' (ya sea por tiempo vencido arriba o botón de pánico)
+        # PASO 2: Procesar Disparados
         response = supabase.table('alertas').select("*").eq('estado', 'disparado').execute()
         alertas_a_procesar = response.data
 
@@ -137,26 +120,17 @@ def tarea_revisar_alertas():
             for alerta in alertas_a_procesar:
                 user_id = alerta['user_id']
                 mensaje = alerta.get('mensaje_personalizado', "Alerta de seguridad activada.")
-                print(f"PROCESANDO ALERTA DISPARADA: {user_id}")
-                sys.stdout.flush()
                 
-                # Obtener contactos
                 res_contactos = supabase.table('contactos').select("*").eq('user_id', user_id).execute()
                 contactos = res_contactos.data
                 
-                if not contactos:
-                    print(f"Usuario {user_id} no tiene contactos. Cerrando alerta.")
-                else:
+                if contactos:
                     nums_llamada = [c['telefono'] for c in contactos if c['es_primario']]
                     nums_mensaje = [c['telefono'] for c in contactos]
-
-                    # Ejecutar Telegram
                     loop.run_until_complete(realizar_llamada_y_mensaje(nums_llamada, nums_mensaje, mensaje))
                 
-                # --- PASO FINAL: CERRAR ALERTA (Disparado -> Inactivo) ---
-                # Esto asegura que no se vuelva a ejecutar en el siguiente ciclo
                 supabase.table('alertas').update({'estado': 'inactivo'}).eq('id', alerta['id']).execute()
-                print(f"Alerta {alerta['id']} finalizada y pasada a inactivo.")
+                print(f"🏁 Alerta {alerta['id']} finalizada.")
                 sys.stdout.flush()
             
             loop.close()
@@ -165,83 +139,23 @@ def tarea_revisar_alertas():
         print(f"Error en tarea programada: {e}")
         sys.stdout.flush()
 
-    if alertas_vencidas:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        
-        # Validamos conexión antes de proceder
-        if loop.run_until_complete(iniciar_telegram()):
-            for alerta in alertas_vencidas:
-                # ... (ejecutar protocolo)
-        else:
-            print("⚠️ DEBUG: Saltando ejecución de Telegram por falta de conexión.")
-        
-        loop.close()
-
 # --- SCHEDULER ---
 scheduler = BackgroundScheduler()
-# Reduje el intervalo a 10 segundos para que reaccione más rápido al cambio de estado
 scheduler.add_job(func=tarea_revisar_alertas, trigger="interval", seconds=10)
 scheduler.start()
 
 # --- RUTAS FLASK ---
-
 @app.route('/ejecutar_emergencia', methods=['POST'])
 def force_trigger():
-    """
-    Ruta para Botón de Pánico o Código Falso.
-    Cambia estado a 'disparado' inmediatamente y deja que el Scheduler lo procese (o lo procesa aquí).
-    Para respuesta inmediata, lo procesamos aquí y cerramos a inactivo.
-    """
     data = request.json
     user_id = data.get('user_id')
-    
-    if not user_id:
-        return jsonify({"error": "Falta User ID"}), 400
-
-    print(f"DEBUG: Emergencia manual recibida para {user_id}")
-    sys.stdout.flush()
+    if not user_id: return jsonify({"error": "Falta User ID"}), 400
 
     try:
-        # 1. Obtener la alerta activa (si existe) para sacar el mensaje personalizado
-        res_alerta = supabase.table('alertas').select("*").eq('user_id', user_id).execute()
-        
-        mensaje = "AYUDA: Emergencia de seguridad activada."
-        if res_alerta.data:
-            # Si había un mensaje configurado, lo usamos
-            alerta_data = res_alerta.data[0]
-            if alerta_data.get('mensaje_personalizado'):
-                mensaje = alerta_data.get('mensaje_personalizado')
-            
-            # Actualizamos el estado a disparado inmediatamente
-            supabase.table('alertas').update({'estado': 'disparado'}).eq('id', alerta_data['id']).execute()
-
-        # 2. Obtener contactos
-        res_contactos = supabase.table('contactos').select("*").eq('user_id', user_id).execute()
-        contactos = res_contactos.data
-        
-        if not contactos:
-            # Si no hay contactos, simplemente cerramos la alerta
-            supabase.table('alertas').update({'estado': 'inactivo'}).eq('user_id', user_id).execute()
-            return jsonify({"status": "Alerta registrada (sin contactos)"}), 200
-        
-        nums_llamada = [c['telefono'] for c in contactos if c['es_primario']]
-        nums_mensaje = [c['telefono'] for c in contactos]
-
-        # 3. Ejecutar Telegram
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        loop.run_until_complete(realizar_llamada_y_mensaje(nums_llamada, nums_mensaje, mensaje))
-        loop.close()
-        
-        # 4. FINALIZAR (Pasar a inactivo)
-        supabase.table('alertas').update({'estado': 'inactivo'}).eq('user_id', user_id).execute()
-        
-        return jsonify({"status": "Protocolo ejecutado y cerrado"}), 200
-
+        supabase.table('alertas').update({'estado': 'disparado'}).eq('user_id', user_id).execute()
+        # El scheduler la procesará en el siguiente ciclo (máximo 10 seg)
+        return jsonify({"status": "Alerta disparada en sistema"}), 200
     except Exception as e:
-        print(f"ERROR CRÍTICO MANUAL: {str(e)}") 
-        sys.stdout.flush()
         return jsonify({"error": str(e)}), 500
 
 @app.route('/ping', methods=['GET'])
