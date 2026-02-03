@@ -1,0 +1,276 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Protocolo de Seguridad</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+    <style>
+        :root { --primary-red: #d90429; --bg-color: #f8f9fa; }
+        body { background-color: var(--bg-color); color: #2b2d42; min-height: 100vh; display: flex; align-items: center; justify-content: center; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; padding: 20px; }
+        .card { border: none; border-radius: 24px; padding: 2rem; box-shadow: 0 15px 40px rgba(0,0,0,0.08); width: 100%; max-width: 400px; background: white; }
+        #timerDisplay { font-size: 4.5rem; font-weight: 800; color: var(--primary-red); line-height: 1; margin: 20px 0; }
+        .hidden { display: none !important; }
+        .form-control { border-radius: 12px; padding: 12px; background-color: #edf2f4; border: none; margin-bottom: 10px; }
+        .btn-danger { background-color: var(--primary-red); border-radius: 12px; padding: 14px; font-weight: 700; width: 100%; border: none; }
+        .status-dot { height: 10px; width: 10px; background-color: #ccc; border-radius: 50%; display: inline-block; margin-right: 5px; }
+        .admin-panel { background: #fff0f3; border-radius: 15px; padding: 15px; margin-top: 20px; border: 1px dashed #ffccd5; }
+    </style>
+</head>
+<body>
+
+<audio id="alarmSound" loop>
+    <source src="https://actions.google.com/sounds/v1/alarms/beep_short.ogg" type="audio/ogg">
+</audio>
+
+<div class="card text-center">
+    
+    <div id="loginView">
+        <h3 class="fw-bold mb-4">Acceso Seguro</h3>
+        <input type="email" id="email" class="form-control" placeholder="Correo electrónico">
+        <input type="password" id="password" class="form-control" placeholder="Contraseña">
+        <button class="btn btn-danger mt-2" onclick="handleLogin()">INGRESAR</button>
+        <p id="authMsg" class="mt-3 small text-muted"></p>
+    </div>
+
+    <div id="setupView" class="hidden">
+        <div class="d-flex justify-content-between align-items-center mb-3">
+            <span id="userBadge" class="badge bg-secondary">Usuario</span>
+            <button class="btn btn-sm text-danger fw-bold" onclick="handleLogout()">Salir</button>
+        </div>
+        
+        <div class="mb-4">
+            <span class="status-dot" id="sysDot"></span><span id="sysText" class="small text-muted">Conectando...</span>
+        </div>
+
+        <h5 class="fw-bold">Configurar Temporizador</h5>
+        <select id="timeSelect" class="form-select form-select-lg text-center fw-bold mb-3" style="border-radius: 12px;">
+            <option value="1">1 Minuto (Prueba)</option>
+            <option value="15">15 Minutos</option>
+            <option value="30">30 Minutos</option>
+            <option value="60">1 Hora</option>
+        </select>
+        
+        <button class="btn btn-danger btn-lg shadow-sm" onclick="activateProtocol()">🛡️ ACTIVAR PROTECCIÓN</button>
+
+        <button class="btn btn-link text-muted mt-3 small" onclick="document.getElementById('contactForm').classList.toggle('hidden')">Gestionar Contactos</button>
+        
+        <div id="contactForm" class="hidden admin-panel text-start">
+            <label class="small fw-bold text-danger mb-1">Nuevo Contacto de Emergencia</label>
+            <input type="text" id="cName" class="form-control form-control-sm" placeholder="Nombre">
+            <input type="tel" id="cPhone" class="form-control form-control-sm" placeholder="+593999999999">
+            <button class="btn btn-dark btn-sm w-100 mt-1" onclick="addContact()">Guardar Contacto</button>
+            <div id="contactMsg" class="small mt-2"></div>
+        </div>
+    </div>
+
+    <div id="activeView" class="hidden">
+        <div class="spinner-grow text-danger spinner-grow-sm mb-2" role="status"></div>
+        <p class="small text-muted fw-bold mb-0">MONITOREO ACTIVO</p>
+        
+        <div id="timerDisplay">00:00</div>
+        
+        <p class="text-muted small mb-2">Ingrese código para desactivar</p>
+        <input type="tel" id="codeInput" class="form-control text-center fw-bold fs-3" maxlength="4" placeholder="••••" style="letter-spacing: 8px;" oninput="checkCode()">
+        
+        <div id="statusMsg" class="mt-3 fw-bold small"></div>
+    </div>
+
+</div>
+
+<script>
+    // --- CONFIGURACIÓN ---
+    const SUPABASE_URL = "https://rbipvhgyhrhmfzhcmoms.supabase.co"; 
+    const SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InJiaXB2aGd5aHJobWZ6aGNtb21zIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjYxMTA2MjQsImV4cCI6MjA4MTY4NjYyNH0.bUykMfOOmDJckkHydUiYlLjJ93clzvfU0KCh27ivHlw"; 
+    const URL_BACKEND = "https://llama-p0yt.onrender.com"; 
+
+    // --- CÓDIGOS DE SEGURIDAD ---
+    const CODE_SAFE = "2152";   // DETIENE todo (Estás a salvo)
+    const CODE_DURESS = "2005"; // PARECE detener, pero DISPARA emergencia (Pánico silencioso)
+    const CODE_PANIC = "2010";  // DISPARA emergencia explícita
+
+    // CORRECCIÓN AQUÍ: Usamos 'supabaseClient' en lugar de 'supabase'
+    // La variable global 'supabase' viene de la librería, 'supabaseClient' es nuestra conexión.
+    const supabaseClient = supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
+    
+    let timerInterval, currentUser = null, endTime = 0, audioPlayed = false;
+
+    // --- AUTH ---
+    async function handleLogin() {
+        const email = document.getElementById('email').value;
+        const pass = document.getElementById('password').value;
+        // CORRECCIÓN: Usamos supabaseClient
+        const { data, error } = await supabaseClient.auth.signInWithPassword({ email, password: pass });
+        if (error) {
+            document.getElementById('authMsg').innerText = "Error: " + error.message;
+        } else {
+            checkSession();
+        }
+    }
+    
+    // CORRECCIÓN: Usamos supabaseClient
+    async function handleLogout() { await supabaseClient.auth.signOut(); location.reload(); }
+
+    async function checkSession() {
+        // CORRECCIÓN: Usamos supabaseClient
+        const { data } = await supabaseClient.auth.getSession();
+        if (data.session) {
+            currentUser = data.session.user;
+            document.getElementById('loginView').classList.add('hidden');
+            document.getElementById('userBadge').innerText = currentUser.email;
+            
+            // Verificar si hay alerta activa en DB al recargar
+            // CORRECCIÓN: Usamos supabaseClient
+            const { data: alerta } = await supabaseClient.from('alertas').select('*').eq('user_id', currentUser.id).eq('estado', 'activo').maybeSingle();
+            if (alerta) {
+                endTime = alerta.tiempo_fin;
+                startCountdownUI();
+            } else {
+                document.getElementById('setupView').classList.remove('hidden');
+            }
+            checkSystem();
+        }
+    }
+    window.onload = checkSession;
+
+    // --- LÓGICA DE ALERTA ---
+    async function activateProtocol() {
+        const mins = parseInt(document.getElementById('timeSelect').value);
+        endTime = Date.now() + (mins * 60 * 1000);
+        
+        // Guardar estado activo en DB
+        // CORRECCIÓN: Usamos supabaseClient
+        await supabaseClient.from('alertas').upsert({ 
+            user_id: currentUser.id, 
+            tiempo_fin: endTime, 
+            estado: 'activo',
+            mensaje_personalizado: "Alerta activa protocolo"
+        }, { onConflict: 'user_id' });
+
+        startCountdownUI();
+    }
+
+    function startCountdownUI() {
+        document.getElementById('setupView').classList.add('hidden');
+        document.getElementById('activeView').classList.remove('hidden');
+        if (timerInterval) clearInterval(timerInterval);
+        timerInterval = setInterval(updateTimer, 1000);
+        updateTimer();
+    }
+
+    function updateTimer() {
+        const now = Date.now();
+        const diff = endTime - now;
+
+        if (diff <= 0) {
+            clearInterval(timerInterval);
+            document.getElementById('timerDisplay').innerText = "00:00";
+            triggerEmergency("Tiempo agotado");
+            return;
+        }
+
+        // Sonido en los últimos 2 minutos
+        if (diff < 120000 && !audioPlayed) {
+            document.getElementById('alarmSound').play().catch(e => console.log("Audio bloq"));
+            audioPlayed = true;
+        }
+
+        const m = Math.floor(diff / 60000);
+        const s = Math.floor((diff % 60000) / 1000);
+        document.getElementById('timerDisplay').innerText = `${m}:${s.toString().padStart(2, '0')}`;
+    }
+
+    // --- VERIFICACIÓN DE CÓDIGOS ---
+    let isProcessing = false;
+    async function checkCode() {
+        if (isProcessing) return;
+        const code = document.getElementById('codeInput').value;
+        
+        if (code.length === 4) {
+            isProcessing = true;
+            document.getElementById('alarmSound').pause();
+
+            if (code === CODE_SAFE) {
+                // 2152: CÓDIGO SEGURO -> Apaga todo real
+                await stopProtocol();
+                alert("Protocolo desactivado correctamente.");
+                location.reload();
+            } 
+            else if (code === CODE_DURESS) {
+                // 2005: CÓDIGO PÁNICO SILENCIOSO -> Dispara alerta pero finge apagarse
+                triggerEmergency("Código Coacción 2005");
+                document.getElementById('activeView').innerHTML = '<h3 class="text-success mt-5">Sistema Desactivado</h3><p>Protocolo finalizado.</p>';
+                setTimeout(() => location.reload(), 3000); // Recarga para fingir normalidad
+            } 
+            else if (code === CODE_PANIC) {
+                // 2010: PÁNICO EXPLÍCITO
+                triggerEmergency("Código Pánico 2010");
+            }
+            else {
+                // Código incorrecto
+                document.getElementById('codeInput').value = "";
+                document.getElementById('statusMsg').innerText = "Código Incorrecto";
+                isProcessing = false;
+            }
+        }
+    }
+
+    async function stopProtocol() {
+        clearInterval(timerInterval);
+        // CORRECCIÓN: Usamos supabaseClient
+        await supabaseClient.from('alertas').update({ estado: 'inactivo' }).eq('user_id', currentUser.id);
+    }
+
+    async function triggerEmergency(razon) {
+        clearInterval(timerInterval);
+        document.getElementById('statusMsg').innerText = "ENVIANDO ALERTA...";
+        document.getElementById('statusMsg').className = "mt-2 text-danger fw-bold blink";
+        
+        try {
+            // Llamada al Backend
+            await fetch(`${URL_BACKEND}/ejecutar_emergencia`, {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({ user_id: currentUser.id })
+            });
+        } catch (e) {
+            console.error("Error contactando servidor", e);
+        }
+    }
+
+    // --- UTILIDADES ---
+    async function addContact() {
+        const name = document.getElementById('cName').value;
+        const phone = document.getElementById('cPhone').value;
+        if(!name || !phone) return;
+        
+        // CORRECCIÓN: Usamos supabaseClient
+        const { error } = await supabaseClient.from('contactos').insert({ user_id: currentUser.id, nombre: name, telefono: phone, es_primario: true });
+        const msg = document.getElementById('contactMsg');
+        
+        if(error) { msg.innerText = "Error guardar"; msg.className = "text-danger small"; }
+        else { 
+            msg.innerText = "Guardado OK"; msg.className = "text-success small";
+            document.getElementById('cName').value = ""; document.getElementById('cPhone').value = "";
+        }
+    }
+
+    async function checkSystem() {
+        try {
+            const res = await fetch(`${URL_BACKEND}/telegram_status`);
+            const data = await res.json();
+            const dot = document.getElementById('sysDot');
+            const txt = document.getElementById('sysText');
+            if (data.status === 'connected') {
+                dot.style.backgroundColor = '#2ecc71';
+                txt.innerText = "Sistema Operativo";
+            } else {
+                dot.style.backgroundColor = 'red';
+                txt.innerText = "Error Conexión";
+            }
+        } catch (e) { console.log(e); }
+    }
+</script>
+</body>
+</html>
